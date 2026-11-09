@@ -1,0 +1,349 @@
+(() => {
+  const body = document.body;
+  const cover = document.getElementById("inviteCover");
+  const coverBtn = document.getElementById("openInvitation");
+  const music = document.getElementById("weddingMusic");
+  const musicToggle = document.getElementById("musicToggle");
+  const main = document.getElementById("top");
+  const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  let opened = false;
+  let musicStarted = false;
+  let retryHandler = null;
+
+  /* ------------------------------------------------------------------
+   * Cover intro sequence
+   * Lock the scroll, paint the cover, then on the next frame add
+   * `cover-loaded` so the staggered fade-up animation can run.
+   * ------------------------------------------------------------------ */
+  body.classList.add("cover-active");
+  requestAnimationFrame(() => requestAnimationFrame(() => body.classList.add("cover-loaded")));
+
+  /* ------------------------------------------------------------------
+   * Music — started only after the user clicks "Open Invitation".
+   * Browsers block audio that tries to autoplay before a user gesture,
+   * so play() is deliberately called from inside the click handler.
+   * ------------------------------------------------------------------ */
+  const MUSIC_TARGET_VOLUME = 0.4;
+  const MUSIC_FADE_MS = prefersReduced ? 300 : 2000;
+  const RETRY_EVENTS = ["pointerdown", "pointerup", "touchend", "click", "keydown", "scroll"];
+  const RETRYABLE_ERRORS = ["NotAllowedError", "AbortError"];
+
+  function applyPlayingUI(playing) {
+    musicToggle.classList.toggle("is-playing", playing);
+    musicToggle.classList.toggle("is-paused", !playing);
+    musicToggle.querySelector(".music-glyph").textContent = playing ? "♫" : "♪";
+    musicToggle.setAttribute("aria-label", playing ? "Pause music" : "Play music");
+  }
+
+  function disarmRetry() {
+    if (!retryHandler) return;
+    RETRY_EVENTS.forEach(evt => window.removeEventListener(evt, retryHandler));
+    retryHandler = null;
+  }
+
+  function armRetry() {
+    if (retryHandler) return;
+    retryHandler = () => {
+      disarmRetry();
+      startMusic();
+    };
+    RETRY_EVENTS.forEach(evt => window.addEventListener(evt, retryHandler, { passive: true }));
+  }
+
+  /* Timer-driven, not requestAnimationFrame: rAF is throttled to a stop in
+   * Android WebViews, in-app browsers and backgrounded tabs, which used to
+   * strand the ramp half-finished and leave the track silent. */
+  function fadeInMusic() {
+    const start = performance.now();
+    (function ramp() {
+      const t = Math.min(1, (performance.now() - start) / MUSIC_FADE_MS);
+      music.volume = MUSIC_TARGET_VOLUME * t;
+      if (t < 1) window.setTimeout(ramp, 50);
+    })();
+  }
+
+  /* Backstop for the case where play() never settles at all — the element
+   * would otherwise stay at volume 0 forever while reporting as playing. */
+  function ensureAudible() {
+    window.setTimeout(() => {
+      if (music.volume < MUSIC_TARGET_VOLUME) music.volume = MUSIC_TARGET_VOLUME;
+    }, MUSIC_FADE_MS + 2000);
+  }
+
+  function startMusic() {
+    if (musicStarted) return;
+    musicStarted = true;
+    music.volume = 0;
+    ensureAudible();
+
+    music.play().then(() => {
+      // Playback genuinely started — reflect that in the toggle icon.
+      disarmRetry();
+      applyPlayingUI(true);
+      fadeInMusic();
+    }).catch(err => {
+      // Log the REAL reason instead of swallowing it. Open this on the
+      // Android device via chrome://inspect (USB debugging) to see
+      // whether it's NotAllowedError (autoplay/gesture blocked by the
+      // browser context, e.g. an in-app WebView) or NotSupportedError
+      // (the mp3/m4a file itself failed to load or decode).
+      console.warn("[weddingMusic] autoplay failed:", err && err.name, err && err.message);
+      musicStarted = false;
+      // Leave the toggle showing "paused" (♪) so the visitor sees an
+      // accurate state and can tap it themselves — a direct tap is a
+      // fresh user gesture and will satisfy the browser's autoplay
+      // policy even when the automatic attempt above didn't.
+      applyPlayingUI(false);
+      // Only gesture-policy and interruption failures are worth retrying;
+      // a decode or format error fails identically on every attempt.
+      if (err && RETRYABLE_ERRORS.indexOf(err.name) !== -1) armRetry();
+    });
+  }
+
+  /* ------------------------------------------------------------------
+   * Music toggle — pause/resume. play()/pause() are the only calls, so
+   * scrolling, opening menus or following section links never restart
+   * the song. The volume stays at the faded-in level.
+   * ------------------------------------------------------------------ */
+  function setPlaying(playing) {
+    disarmRetry();
+    if (playing) {
+      musicStarted = true;
+      music.volume = MUSIC_TARGET_VOLUME;
+      music.play().then(() => applyPlayingUI(true)).catch(err => {
+        console.warn("[weddingMusic] manual play() failed:", err && err.name, err && err.message);
+        musicStarted = false;
+        applyPlayingUI(false);
+        if (err && RETRYABLE_ERRORS.indexOf(err.name) !== -1) armRetry();
+      });
+    } else {
+      applyPlayingUI(false);
+      music.pause();
+    }
+  }
+  musicToggle.addEventListener("click", () => setPlaying(music.paused));
+
+  /* ------------------------------------------------------------------
+   * Opening transition — triggered by clicking the Open button.
+   * The button press, music start and card-open classes are applied
+   * together. Once the transition has played out, `body.loaded` is added
+   * so the hero performs its normal entrance, and the cover is removed.
+   * ------------------------------------------------------------------ */
+  const OPEN_DELAY = prefersReduced ? 350 : 1300;
+
+  function openInvitation() {
+    if (opened) return;
+    opened = true;
+    coverBtn.classList.add("is-pressed");
+    startMusic();
+    body.classList.add("cover-opening");
+    body.classList.remove("cover-active");
+    main.setAttribute("aria-hidden", "false");
+    window.setTimeout(() => {
+      body.classList.add("loaded");
+      musicToggle.hidden = false;
+      cover.classList.add("is-gone");
+      window.setTimeout(() => {
+        cover.remove();
+        body.classList.remove("cover-opening");
+      }, 700);
+    }, OPEN_DELAY);
+  }
+  coverBtn.addEventListener("click", openInvitation);
+
+  const revealItems = document.querySelectorAll(".reveal");
+  const observer = new IntersectionObserver((entries, obs) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add("is-visible");
+        obs.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.13, rootMargin: "0px 0px -40px 0px" });
+  revealItems.forEach(item => observer.observe(item));
+
+  const garland = document.querySelector(".mg-garland");
+  function qPoint(x0, y0, cx, cy, x1, y1, t) {
+    const mt = 1 - t;
+    return { x: mt * mt * x0 + 2 * mt * t * cx + t * t * x1, y: mt * mt * y0 + 2 * mt * t * cy + t * t * y1 };
+  }
+  function buildMarigolds() {
+    if (!garland) return;
+    const ns = "http://www.w3.org/2000/svg";
+    const main = Array.from({ length: 21 }, (_, i) => i / 20).map(t => qPoint(110, 182, 240, 294, 370, 182, t));
+    const sub = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9].map(t => qPoint(122, 190, 240, 302, 358, 190, t));
+    const mk = (p, r, color, delay) => {
+      const c = document.createElementNS(ns, "circle");
+      c.setAttribute("cx", p.x.toFixed(1));
+      c.setAttribute("cy", p.y.toFixed(1));
+      c.setAttribute("r", r);
+      c.setAttribute("class", "mg-marigold");
+      c.setAttribute("fill", color);
+      c.style.setProperty("--d", `${delay}s`);
+      return c;
+    };
+    const frag = document.createDocumentFragment();
+    main.forEach((p, i) => frag.appendChild(mk(p, 4.6, i % 2 ? "#b58a3c" : "#ca8743", 0.55 + i * 0.028)));
+    sub.forEach((p, i) => frag.appendChild(mk(p, 4.0, i % 2 ? "#d9826e" : "#d9a25f", 0.6 + i * 0.04)));
+    garland.prepend(frag);
+  }
+  buildMarigolds();
+
+  const progress = document.querySelector(".progress-bar span");
+  const timelineProgress = document.querySelector(".timeline-progress span");
+  const celebration = document.querySelector("#celebrations");
+  const mandapArt = document.querySelector(".venue-art .mandap");
+  const mandapBg = mandapArt?.querySelector(".parallax-bg");
+  const mandapFg = mandapArt?.querySelector(".parallax-fg");
+  let ticking = false;
+
+  function updateScrollEffects() {
+    const scrollTop = window.scrollY;
+    const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+    const pageProgress = maxScroll > 0 ? scrollTop / maxScroll : 0;
+    progress.style.width = `${pageProgress * 100}%`;
+
+    if (celebration && timelineProgress) {
+      const rect = celebration.getBoundingClientRect();
+      const visible = Math.max(0, Math.min(1, (window.innerHeight - rect.top) / (window.innerHeight + rect.height)));
+      timelineProgress.style.width = `${Math.max(0, Math.min(100, visible * 135 - 12))}%`;
+    }
+
+    if (mandapArt && mandapBg && mandapFg) {
+      const rect = mandapArt.getBoundingClientRect();
+      const offset = Math.max(-1, Math.min(1, (rect.top + rect.height / 2 - window.innerHeight / 2) / (window.innerHeight * 0.55)));
+      mandapBg.style.setProperty("--mg-bg", `${offset * 7}px`);
+      mandapFg.style.setProperty("--mg-fg", `${-offset * 4}px`);
+    }
+    ticking = false;
+  }
+  window.addEventListener("scroll", () => {
+    if (!ticking) { requestAnimationFrame(updateScrollEffects); ticking = true; }
+  }, { passive: true });
+  updateScrollEffects();
+
+  const themeObserver = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting && entry.target.dataset.theme === "dark") body.classList.add("theme-dark");
+      else if (entry.isIntersecting && entry.target.dataset.theme === "light") body.classList.remove("theme-dark");
+    });
+  }, { threshold: 0.45 });
+  document.querySelectorAll("[data-theme]").forEach(section => themeObserver.observe(section));
+
+  const toggle = document.querySelector(".nav-toggle");
+  const menu = document.querySelector(".nav-menu");
+  toggle?.addEventListener("click", () => {
+    const open = menu.classList.toggle("open");
+    toggle.classList.toggle("open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+  });
+  menu?.querySelectorAll("a").forEach(link => link.addEventListener("click", () => {
+    menu.classList.remove("open"); toggle.classList.remove("open"); toggle.setAttribute("aria-expanded", "false");
+  }));
+
+  const petalLayer = document.querySelector(".petal-layer");
+  let lastScrollY = window.scrollY, scrollVelocity = 0;
+  window.addEventListener("scroll", () => { const current=window.scrollY; scrollVelocity=Math.min(4,Math.abs(current-lastScrollY)); lastScrollY=current; }, {passive:true});
+  function createPetal() {
+    if (document.hidden) return;
+    const petal=document.createElement("span"); petal.className="petal"; petal.style.left=`${Math.random()*100}%`;
+    petal.style.setProperty("--drift",`${-100+Math.random()*200}px`);
+    petal.style.animationDuration=`${Math.max(4,9-scrollVelocity*.8)+Math.random()*4}s`;
+    petal.style.animationDelay=`${Math.random()*.7}s`; petal.style.transform=`rotate(${Math.random()*180}deg)`;
+    petalLayer.appendChild(petal); setTimeout(()=>petal.remove(),15000);
+  }
+  setInterval(createPetal,1500);
+
+  const heroFlowers=document.querySelectorAll(".floral");
+  window.addEventListener("scroll",()=>{const y=window.scrollY;heroFlowers.forEach((flower,index)=>{const direction=index===0?1:-1;flower.style.translate=`0 ${Math.min(y*.035*direction,25)}px`;});},{passive:true});
+
+  const countdown=document.querySelector(".countdown");
+  const weddingDate=countdown?new Date(countdown.dataset.date).getTime():null;
+  function updateCountdown(){
+    if(!weddingDate)return; const distance=Math.max(0,weddingDate-Date.now());
+    /* Days are shown unpadded (63, not 063); the clock units stay
+     * zero-padded to two digits so the row keeps its fixed rhythm. */
+    const values={days:String(Math.floor(distance/86400000)),hours:String(Math.floor(distance%86400000/3600000)).padStart(2,"0"),minutes:String(Math.floor(distance%3600000/60000)).padStart(2,"0"),seconds:String(Math.floor(distance%60000/1000)).padStart(2,"0")};
+    Object.entries(values).forEach(([unit,value])=>{const el=countdown.querySelector(`[data-unit="${unit}"]`);if(el&&el.textContent!==value){el.animate([{transform:"translateY(-8px)",opacity:.25},{transform:"translateY(0)",opacity:1}],{duration:320,easing:"cubic-bezier(.2,.8,.2,1)"});el.textContent=value;}});
+  }
+  updateCountdown(); setInterval(updateCountdown,1000);
+
+  /* ------------------------------------------------------------------
+   * Name auto-fit
+   * The couple's names are set in Cormorant Garamond and marked
+   * `white-space: nowrap`, so a long name like SHANTANU cannot wrap —
+   * it simply overflows its box and gets clipped by the section's
+   * `overflow: hidden`. The responsive font sizes are tuned in vw, and
+   * between roughly 430px and 505px of viewport width they ask for more
+   * room than the 90vw column provides, so the last letters disappear.
+   * Instead of hand-tuning more breakpoints, measure the natural width
+   * of every name and publish a single scale factor as `--name-fit`,
+   * which the CSS multiplies into the base font size. The factor is
+   * never above 1, so names stay as large as the design allows.
+   * ------------------------------------------------------------------ */
+  const FIT_GROUPS = [
+    { group: document.querySelector(".hero-names"), items: ".name-word" },
+    { group: document.querySelector(".cover-names"), items: ".cover-name" }
+  ].filter(entry => entry.group);
+
+  /* Width the name would need if it were allowed to be as wide as it
+   * likes — this is the number the layout has to fit inside. */
+  function naturalWidth(el) {
+    const prevWidth = el.style.width;
+    const prevMaxWidth = el.style.maxWidth;
+    el.style.width = "max-content";
+    el.style.maxWidth = "none";
+    const width = el.getBoundingClientRect().width;
+    el.style.width = prevWidth;
+    el.style.maxWidth = prevMaxWidth;
+    return width;
+  }
+
+  function fitNames() {
+    FIT_GROUPS.forEach(({ group, items }) => {
+      const names = [...group.querySelectorAll(items)];
+      if (!names.length) return;
+
+      /* Measure at the unscaled size: a leftover factor from an earlier
+       * pass would otherwise compound every resize. */
+      group.style.setProperty("--name-fit", "1");
+      const available = group.clientWidth;
+      const widest = names.reduce((max, el) => Math.max(max, naturalWidth(el)), 0);
+      if (!available || !widest) return;
+
+      /* 0.5% of slack absorbs sub-pixel rounding so the last glyph's
+       * right edge can never land exactly on the clip boundary. */
+      const scale = widest > available ? (available / widest) * 0.995 : 1;
+      group.style.setProperty("--name-fit", String(scale));
+    });
+  }
+
+  if (FIT_GROUPS.length) {
+    /* Web fonts change the metrics, so re-fit once they have landed —
+     * the fallback serif is noticeably wider than Cormorant. */
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitNames);
+    else fitNames();
+
+    let fitPending = false;
+    const refit = () => {
+      if (fitPending) return;
+      fitPending = true;
+      requestAnimationFrame(() => { fitPending = false; fitNames(); });
+    };
+    window.addEventListener("resize", refit);
+    window.addEventListener("orientationchange", refit);
+  }
+
+  /* ------------------------------------------------------------------
+   * Footer family-invitation variant
+   * Default: Mangal Pariwar.
+   * ------------------------------------------------------------------ */
+  const familySide = new URLSearchParams(window.location.search).get("family");
+  const footerFamily = document.getElementById("footerFamily");
+  const footerRequest = document.getElementById("footerRequest");
+  if (footerFamily && footerRequest && familySide === "mangal") {
+    footerFamily.textContent = "Mangal Pariwar";
+    footerRequest.innerHTML = "cordially invite you to<br>the wedding celebrations";
+  }
+})();
